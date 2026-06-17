@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบจัดการจองแท็กซี่ ภูเก็ต</title>
+    <link rel="icon" href="https://img1.pic.in.th/images/Gemini_Generated_Image_k7ezqkk7ezqkk7ez.png" type="image/png" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+</head>
+<body class="bg-gray-50 font-sans text-gray-800">
+<div id="app" class="min-h-screen pb-20"></div>
+
+<script>
+// ==========================================
+// Firebase Init
+// ==========================================
+const firebaseConfig = {
+    apiKey: "AIzaSyBSBHOqk-tDSMt5bHWnWrA3W1teJ128VQM",
+    authDomain: "taximanagement-19c6b.firebaseapp.com",
+    projectId: "taximanagement-19c6b",
+    storageBucket: "taximanagement-19c6b.firebasestorage.app",
+    messagingSenderId: "506752445638",
+    appId: "1:506752445638:web:2b69cdc5de60c29c96bbc7"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+// ==========================================
+// Data
+// ==========================================
+const JOB_TYPES = [
+    'รับเข้าสนามบิน (Airport Pickup)',
+    'ส่งออกสนามบิน (Airport Dropoff)',
+    'ภูเก็ตซิตี้ทัวร์ (Phuket City Tour)',
+    'ย้ายโรงแรม (Hotel Transfer)',
+    'เช่าเหมาลำ (Charter)',
+    'อื่นๆ (Other)'
+];
+const VEHICLE_TYPES = ['รถตู้ (Van)', 'รถตู้วีไอพี (VIP Van)', 'รถเก๋ง (Sedan)', 'รถ SUV', 'อื่นๆ (Other)'];
+const BASE_LOCATIONS = ['สนามบินภูเก็ต (HKT)', 'สนามบินสุวรรณภูมิ (BKK)', 'สนามบินดอนเมือง (DMK)'];
+
+// ==========================================
+// State
+// ==========================================
+let bookings = [];
+let isDbConnected = false;
+let activeTab = 'active';
+let editingId = null;
+let recentLocations = [];
+let copyMsgTimer = null;
+
+try {
+    const saved = localStorage.getItem('taxi_recent_locations');
+    recentLocations = saved ? JSON.parse(saved) : [];
+} catch(e) { recentLocations = []; }
+
+const formDefault = () => ({
+    date: '', timeHour: '', timeMinute: '', pax: '1',
+    customerName: '', roomNumber: '', jobType: JOB_TYPES[0],
+    flightType: '', vehicleType: VEHICLE_TYPES[0],
+    pickup: BASE_LOCATIONS[0], customPickup: '',
+    dropoff: BASE_LOCATIONS[1], customDropoff: '',
+    conditions: '', price: ''
+});
+let form = formDefault();
+
+// ==========================================
+// Helpers
+// ==========================================
+function thaiDateShort(d) {
+    if (!d) return '';
+    const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+    const [y,m,day] = d.split('-');
+    return `${parseInt(day)} ${months[parseInt(m)-1]}`;
+}
+function airportShort(loc) {
+    if (!loc) return '';
+    if (loc.includes('HKT') || loc.includes('ภูเก็ต')) return 'ภูเก็ต';
+    if (loc.includes('BKK') || loc.includes('สุวรรณภูมิ')) return 'BKK';
+    if (loc.includes('DMK') || loc.includes('ดอนเมือง')) return 'DMK';
+    return '';
+}
+function shortVehicle(v) {
+    if (!v) return '';
+    let s = v.split('(')[0].trim();
+    return s === 'รถตู้วีไอพี' ? 'ตู้วีไอพี' : s;
+}
+function sortedBookings(arr) {
+    return [...arr].sort((a,b) => {
+        const sa = `${a.date||'9999-12-31'}T${a.time||'23:59'}`;
+        const sb = `${b.date||'9999-12-31'}T${b.time||'23:59'}`;
+        return sa < sb ? -1 : sa > sb ? 1 : 0;
+    });
+}
+function showMsg(msg) {
+    const el = document.getElementById('copy-msg');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    clearTimeout(copyMsgTimer);
+    copyMsgTimer = setTimeout(() => el.classList.add('hidden'), 3000);
+}
+function updateRecentLocations(loc) {
+    if (!loc || !loc.trim()) return;
+    const t = loc.trim();
+    if (BASE_LOCATIONS.includes(t)) return;
+    recentLocations = [t, ...recentLocations.filter(l => l !== t)].slice(0,5);
+    localStorage.setItem('taxi_recent_locations', JSON.stringify(recentLocations));
+}
+
+// ==========================================
+// Render
+// ==========================================
+function locationOptions(selectedVal) {
+    let html = '<optgroup label="สถานที่หลัก">';
+    BASE_LOCATIONS.forEach(loc => {
+        html += `<option value="${loc}" ${selectedVal===loc?'selected':''}>${loc}</option>`;
+    });
+    html += '</optgroup>';
+    if (recentLocations.length > 0) {
+        html += '<optgroup label="ใช้ล่าสุด (Recent)">';
+        recentLocations.forEach(loc => {
+            html += `<option value="${loc}" ${selectedVal===loc?'selected':''}>${loc}</option>`;
+        });
+        html += '</optgroup>';
+    }
+    html += `<option value="อื่นๆ (พิมพ์ระบุเอง)" ${selectedVal==='อื่นๆ (พิมพ์ระบุเอง)'?'selected':''}>อื่นๆ (พิมพ์ระบุเอง)...</option>`;
+    return html;
+}
+
+function render() {
+    const all = sortedBookings(bookings);
+    const active = all.filter(b => !b.isCleared);
+    const cleared = all.filter(b => b.isCleared);
+    const current = activeTab === 'active' ? active : cleared;
+
+    const isAirport = form.jobType.includes('สนามบิน');
+
+    const formHTML = `
+    <section class="w-full md:w-5/12 bg-white rounded-xl shadow-sm border overflow-hidden h-fit ${editingId ? 'border-amber-400 ring-2 ring-amber-100' : 'border-gray-100'}">
+        <div class="p-4 border-b flex items-center gap-2 ${editingId ? 'bg-amber-50 border-amber-100 text-amber-800' : 'bg-blue-50 border-blue-100 text-blue-800'}">
+            <span class="font-semibold">${editingId ? '✏️ แก้ไขข้อมูลงาน' : '➕ เพิ่มงานจองใหม่'}</span>
+        </div>
+        <div class="p-4 space-y-4">
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-sm font-medium text-gray-600 mb-1">📅 วันที่จอง</label>
+                    <input type="date" id="f-date" value="${form.date}" required
+                        class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-600 mb-1">🕐 เวลารับ (24 ชม.)</label>
+                    <div class="flex items-center border border-gray-300 rounded-lg px-2 bg-white h-[38px] focus-within:ring-2 focus-within:ring-blue-500">
+                        <input type="number" id="f-hour" placeholder="HH" min="0" max="23" value="${form.timeHour}"
+                            class="w-1/2 text-center outline-none text-sm bg-transparent">
+                        <span class="text-gray-400 font-bold mx-1">:</span>
+                        <input type="number" id="f-min" placeholder="MM" min="0" max="59" value="${form.timeMinute}"
+                            class="w-1/2 text-center outline-none text-sm bg-transparent">
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-12 gap-3">
+                <div class="col-span-8">
+                    <label class="block text-sm font-medium text-gray-600 mb-1">👤 ชื่อลูกค้า</label>
+                    <input type="text" id="f-name" placeholder="เช่น คุณสมชาย" value="${form.customerName}" required
+                        class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                </div>
+                <div class="col-span-4">
+                    <label class="block text-sm font-medium text-gray-600 mb-1">👥 คน (Pax)</label>
+                    <input type="text" id="f-pax" placeholder="เช่น 2+1" value="${form.pax}" required
+                        class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-sm font-medium text-gray-600 mb-1">💼 ประเภทงาน</label>
+                    <select id="f-jobtype" class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                        ${JOB_TYPES.map(t => `<option value="${t}" ${form.jobType===t?'selected':''}>${t}</option>`).join('')}
+                    </select>
+                    ${isAirport ? `
+                    <div class="mt-2 flex gap-4 bg-blue-50 p-2 rounded-lg border border-blue-100">
+                        <label class="flex items-center gap-1.5 text-sm font-medium text-blue-800 cursor-pointer">
+                            <input type="radio" name="flighttype" value="ดอม" ${form.flightType==='ดอม'?'checked':''} class="w-3.5 h-3.5"> ดอม
+                        </label>
+                        <label class="flex items-center gap-1.5 text-sm font-medium text-blue-800 cursor-pointer">
+                            <input type="radio" name="flighttype" value="อินเตอร์" ${form.flightType==='อินเตอร์'?'checked':''} class="w-3.5 h-3.5"> อินเตอร์
+                        </label>
+                    </div>` : ''}
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-600 mb-1">🚗 ประเภทรถ</label>
+                    <select id="f-vehicle" class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                        ${VEHICLE_TYPES.map(t => `<option value="${t}" ${form.vehicleType===t?'selected':''}>${t}</option>`).join('')}
+                    </select>
+                </div>
+            </div>
+
+            <div class="space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-100">
+                <div>
+                    <label class="block text-sm font-medium text-gray-600 mb-1">📍 สถานที่รับ (Pickup)</label>
+                    <select id="f-pickup" class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none mb-2 bg-white">
+                        ${locationOptions(form.pickup)}
+                    </select>
+                    ${form.pickup==='อื่นๆ (พิมพ์ระบุเอง)' ? `
+                    <input type="text" id="f-custompickup" placeholder="พิมพ์สถานที่รับ..." value="${form.customPickup}"
+                        class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none mb-2">` : ''}
+                    <input type="text" id="f-room" placeholder="ห้อง / เที่ยวบิน (ถ้ามี)..." value="${form.roomNumber}"
+                        class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-600 mb-1">🚩 สถานที่ส่ง (Dropoff)</label>
+                    <select id="f-dropoff" class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none mb-2 bg-white">
+                        ${locationOptions(form.dropoff)}
+                    </select>
+                    ${form.dropoff==='อื่นๆ (พิมพ์ระบุเอง)' ? `
+                    <input type="text" id="f-customdropoff" placeholder="พิมพ์สถานที่ส่ง..." value="${form.customDropoff}"
+                        class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none">` : ''}
+                </div>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">📝 เงื่อนไขเพิ่มเติม / ป้ายชื่อ</label>
+                <textarea id="f-conditions" rows="2" placeholder="เช่น ป้ายชื่อรับสนามบิน, คาร์ซีทเด็ก..."
+                    class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none">${form.conditions}</textarea>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">💰 ค่างาน (บาท)</label>
+                <input type="number" id="f-price" placeholder="ยอดเงิน (เว้นว่างได้)" value="${form.price}"
+                    class="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none font-semibold text-blue-600">
+            </div>
+
+            <div class="flex gap-2">
+                <button onclick="handleSubmit()" ${!isDbConnected?'disabled':''}
+                    class="flex-1 text-white font-medium py-3 rounded-lg shadow-sm transition-colors ${!isDbConnected?'bg-gray-400 cursor-not-allowed':editingId?'bg-amber-600 hover:bg-amber-700':'bg-blue-600 hover:bg-blue-700'}">
+                    ${editingId ? '✅ บันทึกการแก้ไข' : '➕ บันทึกการจอง'}
+                </button>
+                ${editingId ? `<button onclick="cancelEdit()" class="px-4 bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium rounded-lg transition-colors">ยกเลิก</button>` : ''}
+            </div>
+        </div>
+    </section>`;
+
+    const cardsHTML = current.length === 0 ? `
+        <div class="bg-white rounded-xl border border-dashed border-gray-300 p-10 flex flex-col items-center justify-center text-gray-400">
+            <div class="text-4xl mb-3">📋</div>
+            <p>ไม่มีรายการจองในหมวดหมู่นี้</p>
+        </div>` : current.map((b, i) => {
+        const isEditing = editingId === b.id;
+        return `
+        <div class="bg-white rounded-xl shadow-sm border-l-4 p-3 transition-all ${isEditing?'border-l-amber-500 ring-1 ring-amber-300 bg-amber-50':b.isCleared?'border-l-gray-400 opacity-75':'border-l-blue-500 hover:shadow-md'}">
+            <div class="flex justify-between items-start mb-2">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-xs px-2 py-0.5 rounded font-medium ${isEditing?'bg-amber-200 text-amber-800':'bg-blue-100 text-blue-800'}">
+                        ${isEditing ? 'กำลังแก้ไข...' : `งานที่ ${activeTab==='active' ? i+1 : '-'}`}
+                    </span>
+                    <span class="font-bold text-base text-gray-800">${b.customerName} <span class="text-xs font-normal text-gray-500">(${b.pax} ท่าน)</span></span>
+                </div>
+                <div class="flex items-center gap-1">
+                    <button onclick="handleEdit('${b.id}')"
+                        class="p-1.5 rounded-md transition-colors ${isEditing?'bg-amber-200 text-amber-800':'bg-gray-100 text-gray-500 hover:bg-amber-100 hover:text-amber-700'}" title="แก้ไขงาน">✏️</button>
+                    <label class="flex items-center gap-1.5 cursor-pointer bg-gray-50 p-1.5 rounded-md border border-gray-200 hover:bg-blue-50 transition-colors">
+                        <input type="checkbox" ${b.isCleared?'checked':''} onchange="toggleClear('${b.id}',${b.isCleared})"
+                            class="w-4 h-4 rounded text-green-600 border-gray-300 cursor-pointer">
+                        <span class="text-xs font-medium hidden sm:inline ${b.isCleared?'text-green-600':'text-gray-600'}">${b.isCleared?'เคลียร์แล้ว':'เคลียร์'}</span>
+                    </label>
+                </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600 mb-2 bg-gray-50 p-1.5 rounded-md">
+                <span class="font-semibold text-blue-700">📅 ${b.date ? thaiDateShort(b.date) : 'ไม่ระบุ'} ${b.time ? b.time+' น.' : ''}</span>
+                <span>🚗 ${shortVehicle(b.vehicleType)}</span>
+                <span>💼 ${b.jobType.split('(')[0].trim()}${b.jobType.includes('สนามบิน')&&b.flightType?' ('+b.flightType+')':''}</span>
+                ${b.price ? `<span class="font-bold text-green-700 ml-auto">💰 ${Number(b.price).toLocaleString()} ฿</span>` : ''}
+            </div>
+            <div class="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2 text-sm">
+                <div class="flex items-start gap-1.5 flex-1">
+                    <span class="text-green-600 shrink-0">📍</span>
+                    <span class="font-medium text-gray-800">${b.pickup}${b.roomNumber?' <span class="text-gray-500 font-normal">/ '+b.roomNumber+'</span>':''}</span>
+                </div>
+                <span class="hidden sm:block text-gray-300">→</span>
+                <div class="flex items-start gap-1.5 flex-1">
+                    <span class="text-red-600 shrink-0">🚩</span>
+                    <span class="font-medium text-gray-800">${b.dropoff}</span>
+                </div>
+            </div>
+            ${b.conditions ? `
+            <div class="mt-2 pt-2 border-t border-gray-100 flex items-start gap-1.5 text-xs">
+                <span class="text-amber-500 shrink-0">📝</span>
+                <span class="text-amber-700 font-medium">${b.conditions}</span>
+            </div>` : ''}
+        </div>`;
+    }).join('');
+
+    document.getElementById('app').innerHTML = `
+    <header class="bg-blue-600 text-white p-4 shadow-md sticky top-0 z-10">
+        <div class="max-w-4xl mx-auto flex justify-between items-center">
+            <div class="flex items-center gap-2">
+                <img src="https://img1.pic.in.th/images/Gemini_Generated_Image_k7ezqkk7ezqkk7ez.png" alt="Logo" class="h-9 w-9 rounded-lg object-cover bg-white p-0.5">
+                <h1 class="text-xl font-bold tracking-wide">ระบบจัดการจองแท็กซี่</h1>
+            </div>
+            <div class="flex items-center gap-3">
+                <span class="hidden md:flex items-center gap-1 text-xs px-2 py-1 rounded-full border ${isDbConnected?'bg-green-500/20 text-green-100 border-green-400/30':'bg-amber-500/20 text-amber-100 border-amber-400/30'}">
+                    ${isDbConnected ? '☁️ ซิงค์ข้อมูลแล้ว' : '⏳ กำลังเชื่อมต่อ...'}
+                </span>
+                <div class="text-sm bg-blue-700 px-3 py-1.5 rounded-full font-medium">รอจัดรถ: ${active.length} งาน</div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto p-4 flex flex-col md:flex-row gap-6 mt-4">
+        ${formHTML}
+
+        <section class="w-full md:w-7/12 flex flex-col">
+            <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <div class="flex bg-gray-100 p-1 rounded-lg w-full sm:w-auto">
+                    <button onclick="setTab('active')"
+                        class="flex-1 sm:flex-none px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab==='active'?'bg-white shadow-sm text-blue-600':'text-gray-500 hover:text-gray-700'}">
+                        📋 รอจัดรถ (${active.length})
+                    </button>
+                    <button onclick="setTab('cleared')"
+                        class="flex-1 sm:flex-none px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab==='cleared'?'bg-white shadow-sm text-green-600':'text-gray-500 hover:text-gray-700'}">
+                        🕐 เคลียร์แล้ว (${cleared.length})
+                    </button>
+                </div>
+                ${activeTab==='active' ? `
+                <button onclick="copyToClipboard()"
+                    class="w-full sm:w-auto bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-2 shadow-sm transition-colors">
+                    📋 คัดลอกข้อความส่งแชท
+                </button>` : ''}
+            </div>
+
+            <div id="copy-msg" class="hidden bg-green-100 text-green-800 border border-green-200 p-3 rounded-lg mb-4 text-sm text-center">✅</div>
+
+            <div class="space-y-3 pb-10">${!isDbConnected ? `
+                <div class="bg-white rounded-xl border border-dashed border-gray-300 p-10 flex flex-col items-center justify-center text-gray-400">
+                    <div class="text-4xl mb-3">☁️</div><p>กำลังซิงค์ข้อมูลจากฐานข้อมูล...</p>
+                </div>` : cardsHTML}
+            </div>
+        </section>
+    </main>`;
+
+    // re-attach input listeners
+    bindFormListeners();
+}
+
+function bindFormListeners() {
+    const ids = ['f-date','f-hour','f-min','f-name','f-pax','f-room','f-conditions','f-price'];
+    const keys = ['date','timeHour','timeMinute','customerName','pax','roomNumber','conditions','price'];
+    ids.forEach((id, i) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('input', e => { form[keys[i]] = e.target.value; });
+    });
+
+    const jobSel = document.getElementById('f-jobtype');
+    if (jobSel) jobSel.addEventListener('change', e => {
+        form.jobType = e.target.value;
+        if (!form.jobType.includes('สนามบิน')) form.flightType = '';
+        render();
+    });
+
+    const vehSel = document.getElementById('f-vehicle');
+    if (vehSel) vehSel.addEventListener('change', e => { form.vehicleType = e.target.value; });
+
+    const pickupSel = document.getElementById('f-pickup');
+    if (pickupSel) pickupSel.addEventListener('change', e => {
+        form.pickup = e.target.value;
+        render();
+    });
+
+    const dropoffSel = document.getElementById('f-dropoff');
+    if (dropoffSel) dropoffSel.addEventListener('change', e => {
+        form.dropoff = e.target.value;
+        render();
+    });
+
+    const customPickup = document.getElementById('f-custompickup');
+    if (customPickup) customPickup.addEventListener('input', e => { form.customPickup = e.target.value; });
+
+    const customDropoff = document.getElementById('f-customdropoff');
+    if (customDropoff) customDropoff.addEventListener('input', e => { form.customDropoff = e.target.value; });
+
+    const radios = document.querySelectorAll('input[name="flighttype"]');
+    radios.forEach(r => r.addEventListener('change', e => { form.flightType = e.target.value; }));
+}
+
+// ==========================================
+// Actions
+// ==========================================
+function setTab(tab) { activeTab = tab; render(); }
+
+function cancelEdit() { editingId = null; form = formDefault(); render(); }
+
+async function handleSubmit() {
+    const actualPickup = form.pickup === 'อื่นๆ (พิมพ์ระบุเอง)' ? form.customPickup : form.pickup;
+    const actualDropoff = form.dropoff === 'อื่นๆ (พิมพ์ระบุเอง)' ? form.customDropoff : form.dropoff;
+    if (!actualPickup || !actualDropoff) { alert('กรุณาระบุสถานที่รับและส่งครับ'); return; }
+    if (!form.customerName) { alert('กรุณาใส่ชื่อลูกค้าครับ'); return; }
+    if (!form.date) { alert('กรุณาเลือกวันที่ครับ'); return; }
+
+    if (form.pickup === 'อื่นๆ (พิมพ์ระบุเอง)') updateRecentLocations(actualPickup);
+    if (form.dropoff === 'อื่นๆ (พิมพ์ระบุเอง)') updateRecentLocations(actualDropoff);
+
+    let time = '';
+    if (form.timeHour !== '') {
+        const h = String(parseInt(form.timeHour)||0).padStart(2,'0');
+        const m = String(parseInt(form.timeMinute)||0).padStart(2,'0');
+        time = `${h}:${m}`;
+    }
+
+    const data = {
+        date: form.date, time, pax: form.pax,
+        customerName: form.customerName, roomNumber: form.roomNumber,
+        jobType: form.jobType, flightType: form.flightType,
+        vehicleType: form.vehicleType, pickup: actualPickup,
+        dropoff: actualDropoff, conditions: form.conditions, price: form.price
+    };
+
+    try {
+        if (editingId) {
+            await db.collection('taxi_bookings').doc(editingId).update(data);
+            editingId = null;
+            showMsg('อัปเดตข้อมูลบน Cloud เรียบร้อยแล้ว ✅');
+        } else {
+            await db.collection('taxi_bookings').add({ ...data, isCleared: false, createdAt: new Date().toISOString() });
+            showMsg('บันทึกข้อมูลใหม่ลง Cloud เรียบร้อยแล้ว ✅');
+        }
+        const savedDate = form.date;
+        form = formDefault();
+        form.date = savedDate;
+        activeTab = 'active';
+        render();
+    } catch(e) {
+        console.error(e);
+        alert('❌ เกิดข้อผิดพลาด! กรุณาตรวจสอบ Firestore Rules ครับ');
+    }
+}
+
+function handleEdit(id) {
+    const b = bookings.find(x => x.id === id);
+    if (!b) return;
+    const isStdPickup = BASE_LOCATIONS.includes(b.pickup) || recentLocations.includes(b.pickup);
+    const isStdDropoff = BASE_LOCATIONS.includes(b.dropoff) || recentLocations.includes(b.dropoff);
+    let timeHour = '', timeMinute = '';
+    if (b.time) { [timeHour, timeMinute] = b.time.split(':'); }
+    form = {
+        ...b, timeHour, timeMinute,
+        pickup: isStdPickup ? b.pickup : 'อื่นๆ (พิมพ์ระบุเอง)',
+        customPickup: isStdPickup ? '' : b.pickup,
+        dropoff: isStdDropoff ? b.dropoff : 'อื่นๆ (พิมพ์ระบุเอง)',
+        customDropoff: isStdDropoff ? '' : b.dropoff,
+        flightType: b.flightType || ''
+    };
+    editingId = id;
+    activeTab = b.isCleared ? 'cleared' : 'active';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    render();
+}
+
+async function toggleClear(id, current) {
+    try {
+        await db.collection('taxi_bookings').doc(id).update({ isCleared: !current });
+    } catch(e) {
+        console.error(e);
+        alert('เกิดข้อผิดพลาดในการอัปเดตสถานะครับ');
+    }
+}
+
+function copyToClipboard() {
+    const active = sortedBookings(bookings).filter(b => !b.isCleared);
+    if (active.length === 0) { showMsg('ไม่มีรายการงานที่รอจัดรถครับ'); return; }
+
+    let text = '🚕 รายการจองรถ (อัปเดตล่าสุด)\n====================\n\n';
+    active.forEach((b, i) => {
+        text += `งานที่ ${i+1}\n`;
+        if (b.date) text += `📅 ${thaiDateShort(b.date)}\n`;
+        text += `👤 ลูกค้า: ${b.customerName} (${b.pax} ท่าน)\n`;
+        let job = b.jobType.split('(')[0].trim();
+        if (b.jobType.includes('รับเข้าสนามบิน')) job = `รับเข้า ${airportShort(b.pickup)} ${b.flightType||''}`.trim();
+        else if (b.jobType.includes('ส่งออกสนามบิน')) job = `ส่งออก ${airportShort(b.dropoff)} ${b.flightType||''}`.trim();
+        text += `📌 ${job} / ${shortVehicle(b.vehicleType)}\n`;
+        text += `📍 รับ: ${b.pickup} / ${b.roomNumber||'....'}\n`;
+        text += `⏰ เวลารับ: ${b.time ? b.time+' น.' : '....'}\n`;
+        text += `🚩 ส่ง: ${b.dropoff}\n`;
+        if (b.conditions && b.conditions.trim()) text += `📝 โน๊ต: ${b.conditions}\n`;
+        if (b.price) text += `💰 ค่างาน: ${b.price} บาท\n`;
+        text += '--------------------\n';
+    });
+
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); showMsg('คัดลอกข้อความเรียบร้อยแล้ว! 📋'); }
+    catch(e) { showMsg('เกิดข้อผิดพลาดในการคัดลอก'); }
+    document.body.removeChild(ta);
+}
+
+// ==========================================
+// Firebase Listener
+// ==========================================
+db.collection('taxi_bookings').onSnapshot(snapshot => {
+    bookings = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    isDbConnected = true;
+    render();
+}, err => {
+    console.error('Firestore error:', err);
+    alert('⚠️ ไม่สามารถดึงข้อมูลจาก Firebase ได้!\n\nกรุณาตั้งค่า Firestore Rules เป็น "allow read, write: if true;" แล้วกด Publish ครับ');
+});
+
+// Initial render while waiting for DB
+render();
+</script>
+</body>
+</html>
