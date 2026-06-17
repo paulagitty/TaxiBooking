@@ -19,7 +19,11 @@
     <div id="root"></div>
 
     <!-- โค้ดแอปพลิเคชันของคุณ -->
-    <script type="text/babel" data-type="module">
+    <script
+  type="text/babel"
+  data-type="module"
+  data-presets='[["react", {"runtime": "classic"}]]'
+>
         // นำเข้า Firebase Modules
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getFirestore, collection, onSnapshot, addDoc, updateDoc, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
